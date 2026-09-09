@@ -20,6 +20,15 @@ chmod +x scripts/build-app.sh
 open "dist/Moodle Downloader.app"
 ```
 
+## Установка готового релиза
+
+Скачайте DMG со страницы [Releases](https://github.com/shashkudalovv/moodle_downloader/releases),
+откройте его и перетащите приложение в `Applications`. Текущая сборка локально
+подписана, но не нотарифицирована Apple. При первом запуске после предупреждения
+Gatekeeper откройте **Настройки системы → Конфиденциальность и безопасность** и
+нажмите **Всё равно открыть**. Официальная инструкция:
+[Open apps safely on your Mac](https://support.apple.com/102445).
+
 ## Использование
 
 1. При первом запуске войдите в Moodle (включая SSO/2FA, если требуется).
