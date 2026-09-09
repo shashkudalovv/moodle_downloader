@@ -11,12 +11,15 @@ final class AppModel: ObservableObject {
     @Published var state: DownloadState = .idle
     @Published var needsLogin = false
     @Published var isStarting = true
-    @Published var createArchive = true
+    @Published var createArchive = false
     @Published var statusMessage = "Подключаюсь к Innopolis Moodle…"
     @Published var destination: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
 
     private var activeTask: Task<Void, Never>?
+    private var loginTask: Task<Void, Never>?
+    private var credentialTask: Task<Void, Never>?
     private var handledCoursesPage = false
+    private var authenticationInProgress = false
 
     init() {
         webSession.onNavigationFinished = { [weak self] url in
@@ -26,7 +29,15 @@ final class AppModel: ObservableObject {
             self?.isStarting = false
             self?.statusMessage = "Не удалось открыть Moodle: \(error.localizedDescription)"
         }
-        webSession.goHome()
+        Task { [weak self] in
+            guard let self else { return }
+            if let credentials = MoodleCredentialStore.load(),
+               let loginURL = await MoodleAutoLoginService.makeLoginURL(credentials: credentials) {
+                self.webSession.load(loginURL)
+            } else {
+                self.webSession.goHome()
+            }
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(15))
             guard let self, self.isStarting else { return }
@@ -38,15 +49,65 @@ final class AppModel: ObservableObject {
     private func navigationFinished(_ url: URL) {
         isStarting = false
         if url.path.contains("/login") {
-            needsLogin = true
             handledCoursesPage = false
+            authenticationInProgress = true
+            scheduleAutomaticLogin()
             return
         }
         if url.path.contains("/my/courses") {
+            loginTask?.cancel()
+            authenticationInProgress = false
             needsLogin = false
             guard !handledCoursesPage else { return }
             handledCoursesPage = true
             refreshCourses()
+            refreshAutologinCredentials()
+        } else if authenticationInProgress {
+            scheduleLoginReveal()
+        }
+    }
+
+    private func refreshAutologinCredentials() {
+        credentialTask?.cancel()
+        credentialTask = Task { [weak self] in
+            guard let self, let credentials = await self.webSession.captureMobileCredentials(), !Task.isCancelled else { return }
+            MoodleCredentialStore.save(credentials)
+        }
+    }
+
+    private func scheduleAutomaticLogin() {
+        loginTask?.cancel()
+        needsLogin = false
+        isStarting = true
+        loginTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            let continued = await self.webSession.attemptAutomaticLogin()
+            if continued {
+                try? await Task.sleep(for: .seconds(5))
+            } else {
+                // Give Moodle/SSO cookies time to perform their own redirect before
+                // exposing the browser and causing a distracting login-screen flash.
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Task.isCancelled else { return }
+            if self.webSession.currentURL?.path.contains("/login") == false { return }
+            self.isStarting = false
+            self.needsLogin = true
+        }
+    }
+
+    private func scheduleLoginReveal() {
+        loginTask?.cancel()
+        needsLogin = false
+        isStarting = true
+        loginTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            if self.webSession.currentURL?.path.contains("/my/courses") == true { return }
+            self.isStarting = false
+            self.needsLogin = true
         }
     }
 
