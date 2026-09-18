@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var expandedSectionIDs: Set<String> = []
 
     var body: some View {
         ZStack {
@@ -134,7 +135,7 @@ struct ContentView: View {
             } else {
                 List {
                     ForEach(model.sections) { section in
-                        Section {
+                        DisclosureGroup(isExpanded: sectionExpansionBinding(section)) {
                             ForEach(section.activities) { activity in
                                 Button { model.toggleActivity(activity, in: section) } label: {
                                     HStack(spacing: 11) {
@@ -154,21 +155,24 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                                 .padding(.vertical, 3)
                             }
-                        } header: {
-                            Button { model.toggleSection(section) } label: {
-                                HStack(spacing: 9) {
+                        } label: {
+                            HStack(spacing: 9) {
+                                Button { model.toggleSection(section) } label: {
                                     Image(systemName: sectionSelectionIcon(section))
                                         .foregroundStyle(model.selectedActivityCount(in: section) > 0 ? Color.accentColor : .secondary)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(sectionTitle(section)).font(.headline).foregroundStyle(.primary)
-                                        Text("Выбрано: \(model.selectedActivityCount(in: section)) из \(section.activities.count)")
-                                            .font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
                                 }
-                                .contentShape(Rectangle())
+                                .buttonStyle(.plain)
+                                .help(model.selectedActivityCount(in: section) == section.activities.count
+                                      ? "Снять выбор со всего занятия"
+                                      : "Выбрать всё занятие")
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(sectionTitle(section)).font(.headline).foregroundStyle(.primary)
+                                    Text("Выбрано: \(model.selectedActivityCount(in: section)) из \(section.activities.count)")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                Spacer()
                             }
-                            .buttonStyle(.plain)
                             .padding(.vertical, 4)
                         }
                     }
@@ -262,6 +266,17 @@ struct ContentView: View {
     private func sectionTitle(_ section: MoodleSection) -> String {
         let number = section.index > 0 ? "\(section.index). " : ""
         return number + section.name
+    }
+
+    private func sectionExpansionBinding(_ section: MoodleSection) -> Binding<Bool> {
+        let key = "\(model.selectedCourse?.id ?? "none"):\(section.id)"
+        return Binding(
+            get: { expandedSectionIDs.contains(key) },
+            set: { isExpanded in
+                if isExpanded { expandedSectionIDs.insert(key) }
+                else { expandedSectionIDs.remove(key) }
+            }
+        )
     }
 
     private func sectionSelectionIcon(_ section: MoodleSection) -> String {

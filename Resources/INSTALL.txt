@@ -1,4 +1,4 @@
-Moodle Downloader v1.2 — установка
+Moodle Downloader v1.2.1 — установка
 
 1. Перетащите Moodle Downloader.app в папку Applications.
 2. Попробуйте открыть приложение.
