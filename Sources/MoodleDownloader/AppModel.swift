@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
     @Published var selectedCourse: MoodleCourse?
     @Published var sections: [MoodleSection] = []
     @Published var selectedSectionIDs: Set<Int> = []
+    @Published var selectedActivityIDs: Set<String> = []
     @Published var state: DownloadState = .idle
     @Published var needsLogin = false
     @Published var isStarting = true
@@ -147,6 +148,7 @@ final class AppModel: ObservableObject {
         selectedCourse = course
         sections = []
         selectedSectionIDs = []
+        selectedActivityIDs = []
         guard let course else { return }
         loadSections(for: course)
     }
@@ -161,6 +163,7 @@ final class AppModel: ObservableObject {
                 guard selectedCourse?.id == course.id else { return }
                 sections = found.sorted { $0.index < $1.index }
                 selectedSectionIDs = Set(found.map(\.id))
+                selectedActivityIDs = Set(found.flatMap(\.activities).map(\.id))
                 statusMessage = "Найдено уроков и тем: \(found.count)"
                 state = .idle
             } catch is CancellationError {
@@ -173,12 +176,37 @@ final class AppModel: ObservableObject {
     }
 
     func toggleSection(_ section: MoodleSection) {
-        if selectedSectionIDs.contains(section.id) { selectedSectionIDs.remove(section.id) }
-        else { selectedSectionIDs.insert(section.id) }
+        let activityIDs = Set(section.activities.map(\.id))
+        if activityIDs.isSubset(of: selectedActivityIDs) {
+            selectedActivityIDs.subtract(activityIDs)
+            selectedSectionIDs.remove(section.id)
+        } else {
+            selectedActivityIDs.formUnion(activityIDs)
+            selectedSectionIDs.insert(section.id)
+        }
     }
 
-    func selectAllSections() { selectedSectionIDs = Set(sections.map(\.id)) }
-    func clearSectionSelection() { selectedSectionIDs.removeAll() }
+    func toggleActivity(_ activity: MoodleActivity, in section: MoodleSection) {
+        if selectedActivityIDs.contains(activity.id) { selectedActivityIDs.remove(activity.id) }
+        else { selectedActivityIDs.insert(activity.id) }
+        let activityIDs = Set(section.activities.map(\.id))
+        if activityIDs.isSubset(of: selectedActivityIDs) { selectedSectionIDs.insert(section.id) }
+        else { selectedSectionIDs.remove(section.id) }
+    }
+
+    func selectedActivityCount(in section: MoodleSection) -> Int {
+        section.activities.lazy.filter { self.selectedActivityIDs.contains($0.id) }.count
+    }
+
+    func selectAllSections() {
+        selectedSectionIDs = Set(sections.map(\.id))
+        selectedActivityIDs = Set(sections.flatMap(\.activities).map(\.id))
+    }
+
+    func clearSectionSelection() {
+        selectedSectionIDs.removeAll()
+        selectedActivityIDs.removeAll()
+    }
 
     func chooseDestination() {
         let panel = NSOpenPanel()
@@ -209,7 +237,7 @@ final class AppModel: ObservableObject {
     }
 
     func startDownload() {
-        guard let course = selectedCourse, !selectedSectionIDs.isEmpty else { return }
+        guard let course = selectedCourse, !selectedActivityIDs.isEmpty else { return }
         activeTask?.cancel()
         state = .preparing("Читаю структуру курса…")
         activeTask = Task {
@@ -218,30 +246,16 @@ final class AppModel: ObservableObject {
                 let sectionsToDownload: [MoodleSection]
                 if sections.isEmpty {
                     sectionsToDownload = try await scraper.loadSections(course: course)
-                        .filter { selectedSectionIDs.contains($0.id) }
+                        .compactMap { sectionWithSelectedActivities($0) }
                 } else {
-                    sectionsToDownload = sections.filter { selectedSectionIDs.contains($0.id) }
+                    sectionsToDownload = sections.compactMap { sectionWithSelectedActivities($0) }
                 }
-                var candidates: [DownloadCandidate] = []
-                let totalActivities = sectionsToDownload.reduce(0) { $0 + $1.activities.count }
-                var inspected = 0
-                for section in sectionsToDownload {
-                    for activity in section.activities {
-                        try Task.checkCancellation()
-                        inspected += 1
-                        state = .preparing("Проверяю материалы: \(inspected) из \(totalActivities)")
-                        let urls = try await scraper.discoverFiles(in: activity)
-                        for url in urls {
-                            candidates.append(DownloadCandidate(sectionIndex: section.index, sectionName: section.name, activityName: activity.name, url: url))
-                        }
-                    }
-                }
-                candidates = Array(Set(candidates)).sorted { $0.url.absoluteString < $1.url.absoluteString }
+                let candidates = try await discoverCandidates(in: sectionsToDownload, scraper: scraper)
                 guard !candidates.isEmpty else { throw NSError(domain: "MoodleDownloader", code: 1, userInfo: [NSLocalizedDescriptionKey: "В курсе не найдено доступных для скачивания файлов."]) }
                 let cookies = await webSession.cookies()
                 let downloader = FileDownloader(cookies: cookies)
-                let (output, summary) = try await downloader.download(candidates: candidates, course: course, destination: destination, makeArchive: createArchive) { [weak self] done, total, current in
-                    await MainActor.run { self?.state = .downloading(done: done, total: total, current: current) }
+                let (output, summary) = try await downloader.download(candidates: candidates, course: course, destination: destination, makeArchive: createArchive) { done, total, current in
+                    await MainActor.run { self.state = .downloading(done: done, total: total, current: current) }
                 }
                 state = .finished(output, downloaded: summary.downloaded, skipped: summary.skipped)
                 statusMessage = "Скачано файлов: \(summary.downloaded)"
@@ -254,6 +268,121 @@ final class AppModel: ObservableObject {
                 statusMessage = readable(error)
             }
         }
+    }
+
+    func startDownloadAll() {
+        guard !courses.isEmpty else { return }
+        activeTask?.cancel()
+        state = .preparing("Готовлю полный архив Moodle…")
+        activeTask = Task {
+            let temporaryRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MoodleDownloader-\(UUID().uuidString)", isDirectory: true)
+            let staging = temporaryRoot.appendingPathComponent("Moodle Materials", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+                let scraper = MoodleScraper(session: webSession)
+                var plans: [(course: MoodleCourse, candidates: [DownloadCandidate])] = []
+                var skipped = 0
+                for (offset, course) in courses.enumerated() {
+                    try Task.checkCancellation()
+                    state = .preparing("Читаю предмет \(offset + 1) из \(courses.count): \(course.name)")
+                    do {
+                        let courseSections = try await scraper.loadSections(course: course)
+                        let candidates = try await discoverCandidates(
+                            in: courseSections,
+                            scraper: scraper,
+                            messagePrefix: "\(offset + 1)/\(courses.count)"
+                        )
+                        if !candidates.isEmpty { plans.append((course, candidates)) }
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        skipped += 1
+                    }
+                }
+
+                let total = plans.reduce(0) { $0 + $1.candidates.count }
+                guard total > 0 else {
+                    throw NSError(domain: "MoodleDownloader", code: 2, userInfo: [NSLocalizedDescriptionKey: "В курсах не найдено доступных для скачивания файлов."])
+                }
+
+                let cookies = await webSession.cookies()
+                let downloader = FileDownloader(cookies: cookies)
+                var completed = 0
+                var downloaded = 0
+                for plan in plans {
+                    try Task.checkCancellation()
+                    let base = completed
+                    let (_, summary) = try await downloader.download(
+                        candidates: plan.candidates,
+                        course: plan.course,
+                        destination: staging,
+                        makeArchive: false
+                    ) { done, _, current in
+                        await MainActor.run {
+                            self.state = .downloading(done: base + done, total: total, current: "\(plan.course.name): \(current)")
+                        }
+                    }
+                    completed += plan.candidates.count
+                    downloaded += summary.downloaded
+                    skipped += summary.skipped
+                }
+
+                state = .preparing("Создаю общий ZIP-архив…")
+                let output = try await downloader.archive(
+                    folder: staging,
+                    destination: destination,
+                    filename: "Moodle Materials.zip"
+                )
+                state = .finished(output, downloaded: downloaded, skipped: skipped)
+                statusMessage = "Полный архив готов: \(downloaded) файлов"
+                NSWorkspace.shared.activateFileViewerSelecting([output])
+            } catch is CancellationError {
+                try? FileManager.default.removeItem(at: temporaryRoot)
+                state = .idle
+                statusMessage = "Загрузка отменена."
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryRoot)
+                state = .failed(readable(error))
+                statusMessage = readable(error)
+            }
+        }
+    }
+
+    private func sectionWithSelectedActivities(_ section: MoodleSection) -> MoodleSection? {
+        let selected = section.activities.filter { selectedActivityIDs.contains($0.id) }
+        guard !selected.isEmpty else { return nil }
+        return MoodleSection(index: section.index, name: section.name, activities: selected)
+    }
+
+    private func discoverCandidates(
+        in courseSections: [MoodleSection],
+        scraper: MoodleScraper,
+        messagePrefix: String? = nil
+    ) async throws -> [DownloadCandidate] {
+        var candidates: [DownloadCandidate] = []
+        let totalActivities = courseSections.reduce(0) { $0 + $1.activities.count }
+        var inspected = 0
+        for section in courseSections {
+            for activity in section.activities {
+                try Task.checkCancellation()
+                inspected += 1
+                let prefix = messagePrefix.map { "\($0) · " } ?? ""
+                state = .preparing("\(prefix)Проверяю материалы: \(inspected) из \(totalActivities)")
+                let urls = try await scraper.discoverFiles(in: activity)
+                for url in urls {
+                    candidates.append(DownloadCandidate(
+                        sectionIndex: section.index,
+                        sectionName: section.name,
+                        activityName: activity.name,
+                        url: url
+                    ))
+                }
+            }
+        }
+        return Array(Set(candidates)).sorted { $0.url.absoluteString < $1.url.absoluteString }
     }
 
     func cancel() { activeTask?.cancel() }

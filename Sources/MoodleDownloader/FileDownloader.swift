@@ -11,7 +11,7 @@ actor FileDownloader {
         configuration.httpCookieStorage = HTTPCookieStorage.shared
         configuration.httpShouldSetCookies = true
         configuration.timeoutIntervalForRequest = 90
-        configuration.httpAdditionalHeaders = ["User-Agent": "MoodleDownloader/1.0 macOS"]
+        configuration.httpAdditionalHeaders = ["User-Agent": "MoodleDownloader/1.2 macOS"]
         cookies.forEach { HTTPCookieStorage.shared.setCookie($0) }
         session = URLSession(configuration: configuration)
     }
@@ -59,6 +59,12 @@ actor FileDownloader {
             return (archive, Summary(downloaded: downloaded, skipped: skipped))
         }
         return (courseFolder, Summary(downloaded: downloaded, skipped: skipped))
+    }
+
+    func archive(folder: URL, destination: URL, filename: String) throws -> URL {
+        let archive = uniqueURL(in: destination, filename: sanitize(filename))
+        try zip(folder: folder, to: archive)
+        return archive
     }
 
     private func suggestedFilename(response: URLResponse, url: URL) -> String {

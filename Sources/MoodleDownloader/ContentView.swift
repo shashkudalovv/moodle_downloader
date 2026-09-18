@@ -94,6 +94,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 Toggle("Создать ZIP-архив", isOn: $model.createArchive)
+
+                Button { model.startDownloadAll() } label: {
+                    Label("Скачать весь Moodle одним ZIP", systemImage: "archivebox.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+                .disabled(model.courses.isEmpty || model.state.isRunning)
             }
         }
         .padding()
@@ -124,22 +132,46 @@ struct ContentView: View {
             } else if model.sections.isEmpty {
                 emptyPane(icon: "doc.questionmark", title: "Уроки не найдены", detail: "Обновите список; если ошибка повторится, откройте аккаунт и сохраните HTML курса.")
             } else {
-                List(model.sections) { section in
-                    Button { model.toggleSection(section) } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: model.selectedSectionIDs.contains(section.id) ? "checkmark.square.fill" : "square")
-                                .foregroundStyle(model.selectedSectionIDs.contains(section.id) ? Color.accentColor : .secondary)
-                                .font(.title3)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(sectionTitle(section)).font(.headline)
-                                Text("Материалов: \(section.activities.count)").font(.caption).foregroundStyle(.secondary)
+                List {
+                    ForEach(model.sections) { section in
+                        Section {
+                            ForEach(section.activities) { activity in
+                                Button { model.toggleActivity(activity, in: section) } label: {
+                                    HStack(spacing: 11) {
+                                        Image(systemName: model.selectedActivityIDs.contains(activity.id) ? "checkmark.square.fill" : "square")
+                                            .foregroundStyle(model.selectedActivityIDs.contains(activity.id) ? Color.accentColor : .secondary)
+                                        Image(systemName: activityIcon(activity.kind))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 18)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(activity.name).lineLimit(2)
+                                            Text(activityKind(activity.kind)).font(.caption2).foregroundStyle(.tertiary)
+                                        }
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 3)
                             }
-                            Spacer()
+                        } header: {
+                            Button { model.toggleSection(section) } label: {
+                                HStack(spacing: 9) {
+                                    Image(systemName: sectionSelectionIcon(section))
+                                        .foregroundStyle(model.selectedActivityCount(in: section) > 0 ? Color.accentColor : .secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(sectionTitle(section)).font(.headline).foregroundStyle(.primary)
+                                        Text("Выбрано: \(model.selectedActivityCount(in: section)) из \(section.activities.count)")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.vertical, 4)
                         }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 5)
                 }
             }
 
@@ -168,12 +200,12 @@ struct ContentView: View {
             }
 
             Button { model.startDownload() } label: {
-                Label("Скачать выбранные уроки", systemImage: "arrow.down.circle.fill")
+                Label("Скачать выбранные материалы", systemImage: "arrow.down.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(model.selectedCourse == nil || model.selectedSectionIDs.isEmpty || model.state.isRunning)
+            .disabled(model.selectedCourse == nil || model.selectedActivityIDs.isEmpty || model.state.isRunning)
         }
         .padding()
     }
@@ -223,11 +255,41 @@ struct ContentView: View {
 
     private var selectionDescription: String {
         guard !model.sections.isEmpty else { return "Выберите нужные части курса" }
-        return "Выбрано: \(model.selectedSectionIDs.count) из \(model.sections.count)"
+        let total = model.sections.reduce(0) { $0 + $1.activities.count }
+        return "Выбрано материалов: \(model.selectedActivityIDs.count) из \(total)"
     }
 
     private func sectionTitle(_ section: MoodleSection) -> String {
         let number = section.index > 0 ? "\(section.index). " : ""
         return number + section.name
+    }
+
+    private func sectionSelectionIcon(_ section: MoodleSection) -> String {
+        let selected = model.selectedActivityCount(in: section)
+        if selected == 0 { return "square" }
+        if selected == section.activities.count { return "checkmark.square.fill" }
+        return "minus.square.fill"
+    }
+
+    private func activityKind(_ kind: String) -> String {
+        switch kind.lowercased() {
+        case "resource", "file": return "Файл"
+        case "folder": return "Папка с файлами"
+        case "page": return "Страница"
+        case "url": return "Ссылка"
+        case "assign": return "Задание"
+        case "book": return "Книга"
+        default: return kind.capitalized
+        }
+    }
+
+    private func activityIcon(_ kind: String) -> String {
+        switch kind.lowercased() {
+        case "folder": return "folder"
+        case "url": return "link"
+        case "page", "book": return "doc.text"
+        case "assign": return "checklist"
+        default: return "doc"
+        }
     }
 }

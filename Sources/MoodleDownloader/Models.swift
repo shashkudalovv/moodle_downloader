@@ -14,10 +14,12 @@ struct MoodleSection: Identifiable, Codable, Hashable {
     var id: Int { index }
 }
 
-struct MoodleActivity: Codable, Hashable {
+struct MoodleActivity: Identifiable, Codable, Hashable {
     let name: String
     let url: URL
     let kind: String
+
+    var id: String { url.absoluteString }
 }
 
 struct DownloadCandidate: Hashable {
