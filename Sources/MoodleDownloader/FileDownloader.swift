@@ -11,7 +11,7 @@ actor FileDownloader {
         configuration.httpCookieStorage = HTTPCookieStorage.shared
         configuration.httpShouldSetCookies = true
         configuration.timeoutIntervalForRequest = 90
-        configuration.httpAdditionalHeaders = ["User-Agent": "MoodleDownloader/1.2.1 macOS"]
+        configuration.httpAdditionalHeaders = ["User-Agent": "MoodleDownloader/1.2.3 macOS"]
         cookies.forEach { HTTPCookieStorage.shared.setCookie($0) }
         session = URLSession(configuration: configuration)
     }
@@ -32,6 +32,7 @@ actor FileDownloader {
             await progress(offset, candidates.count, candidate.activityName)
             do {
                 let (temporaryURL, response) = try await session.download(from: candidate.url)
+                defer { try? fileManager.removeItem(at: temporaryURL) }
                 guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                     skipped += 1; continue
                 }
@@ -43,8 +44,11 @@ actor FileDownloader {
                 try fileManager.createDirectory(at: sectionFolder, withIntermediateDirectories: true)
                 let serverName = suggestedFilename(response: response, url: candidate.url)
                 let filename = smartFilename(activity: candidate.activityName, serverName: serverName)
-                let output = uniqueURL(in: sectionFolder, filename: filename)
-                try fileManager.moveItem(at: temporaryURL, to: output)
+                let output = sectionFolder.appendingPathComponent(filename)
+                try Task.checkCancellation()
+                try writeOutput(to: output) { stagedFile in
+                    try fileManager.copyItem(at: temporaryURL, to: stagedFile)
+                }
                 downloaded += 1
             } catch is CancellationError {
                 throw CancellationError()
@@ -54,7 +58,7 @@ actor FileDownloader {
         }
         await progress(candidates.count, candidates.count, "Готово")
         if makeArchive {
-            let archive = uniqueURL(in: destination, filename: sanitize(course.name) + ".zip")
+            let archive = destination.appendingPathComponent(sanitize(course.name) + ".zip")
             try zip(folder: courseFolder, to: archive)
             return (archive, Summary(downloaded: downloaded, skipped: skipped))
         }
@@ -62,7 +66,7 @@ actor FileDownloader {
     }
 
     func archive(folder: URL, destination: URL, filename: String) throws -> URL {
-        let archive = uniqueURL(in: destination, filename: sanitize(filename))
+        let archive = destination.appendingPathComponent(sanitize(filename))
         try zip(folder: folder, to: archive)
         return archive
     }
@@ -109,27 +113,40 @@ actor FileDownloader {
         return String(value.prefix(160)).isEmpty ? "Material" : String(value.prefix(160))
     }
 
-    private func uniqueURL(in folder: URL, filename: String) -> URL {
-        var result = folder.appendingPathComponent(filename)
-        let ext = (filename as NSString).pathExtension
-        let stem = (filename as NSString).deletingPathExtension
-        var counter = 2
-        while fileManager.fileExists(atPath: result.path) {
-            let alternative = ext.isEmpty ? "\(stem) (\(counter))" : "\(stem) (\(counter)).\(ext)"
-            result = folder.appendingPathComponent(alternative)
-            counter += 1
+    private func writeOutput(to output: URL, create: (URL) throws -> Void) throws {
+        // Stage on the destination volume so a failed download or ZIP never
+        // removes the previous file and the final replacement is atomic.
+        let staging = try fileManager.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: output,
+            create: true
+        )
+        defer { try? fileManager.removeItem(at: staging) }
+        let stagedFile = staging.appendingPathComponent(output.lastPathComponent)
+        try create(stagedFile)
+
+        if fileManager.fileExists(atPath: output.path) {
+            let values = try output.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            _ = try fileManager.replaceItemAt(output, withItemAt: stagedFile)
+        } else {
+            try fileManager.moveItem(at: stagedFile, to: output)
         }
-        return result
     }
 
     private func zip(folder: URL, to archive: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", folder.path, archive.path]
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            throw CocoaError(.fileWriteUnknown)
+        try writeOutput(to: archive) { stagedFile in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", folder.path, stagedFile.path]
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                throw CocoaError(.fileWriteUnknown)
+            }
         }
     }
 }

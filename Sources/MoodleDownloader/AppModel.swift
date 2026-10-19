@@ -14,7 +14,14 @@ final class AppModel: ObservableObject {
     @Published var isStarting = true
     @Published var createArchive = false
     @Published var statusMessage = "Подключаюсь к Innopolis Moodle…"
-    @Published var destination: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+    @Published var destination: URL = {
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
+            "Library/Mobile Documents/com~apple~CloudDocs/Moodle",
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
 
     private var activeTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
